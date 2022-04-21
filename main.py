@@ -67,10 +67,14 @@ while True:
     chosen = [0] * heroes_per_player
     orders = ["WAIT"] * heroes_per_player
     if dangers:
+        # Enemies are sort by priority and distance for each hero
         for hero in heroes:
             d = dangers.copy()
-            d.sort(key=lambda e: distance(e["x"], e["y"], hero["x"], hero["y"]) - 10e5 * e["near_base"]
-             + distance(e["x"], e["y"], base_x, base_y))
+            d.sort(
+                key=lambda e: distance(e["x"], e["y"], hero["x"], hero["y"])
+                - 10e5 * e["near_base"]
+                + distance(e["x"], e["y"], base_x, base_y)
+            )
             heroes_choices.append(d)
 
         def key(hero):
@@ -78,8 +82,8 @@ while True:
             return distance(closest["x"], closest["y"], hero["x"], hero["y"])
 
         heroes.sort(key=key)
-        
-       
+
+        # Every hero target a different target
         for i in range(heroes_per_player):
             hero = heroes[i]
             for choice in range(len(heroes_choices[i])):
@@ -90,19 +94,21 @@ while True:
                         continue
                     dally = distance(enemy["x"], enemy["y"], ally["x"], ally["y"])
                     dme = distance(enemy["x"], enemy["y"], hero["x"], hero["y"])
+                    # If an ally is already targeting the enemy, we don't target this enemy
                     if dally <= dme and heroes_choices[j].index(enemy) <= chosen[j]:
                         break
                 else:
+                    # If no ally is already targeting the enemy, we target it
                     orders[i] = "MOVE {} {}".format(enemy["x"], enemy["y"])
                     chosen[i] = choice
                     break
             else:
+                # If no enemy is available, we target the closest to the base
                 closest = dangers[0]
                 orders[i] = "MOVE {} {}".format(closest["x"], closest["y"])
+    
+    print(chosen, [e["id"] for e in dangers], file=sys.stderr, flush=True)
     for i in range(heroes_per_player):
-        print(chosen, [e['id'] for e in dangers]
-,            file=sys.stderr,
-            flush=True)
         print(orders[i])
 
         # To debug: print("Debug messages...", file=sys.stderr, flush=True)
