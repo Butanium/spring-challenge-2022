@@ -1,5 +1,5 @@
 import sys
-from math import sqrt, cos, sin, pi
+from math import sqrt, cos, sin, pi, floor
 from traceback import format_exc
 from random import random, seed
 
@@ -269,7 +269,7 @@ def closest_target_point(hero, primary_target, secondary_target):
 
 
 def is_fatal(spider):
-    t = dist(spider, base) / MONSTER_SPEED
+    t = floor(dist(spider, base) / MONSTER_SPEED)
     return spider['health'] - t * HERO_DPS > 0
 
 
