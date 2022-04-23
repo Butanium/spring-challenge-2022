@@ -447,7 +447,7 @@ while True:
             for choice in range(len(heroes_choices[hero_id])):
                 spider = heroes_choices[hero_id][choice]
                 if spider['shield_life'] and (my_mana >= 20 or turn <= 40):
-                    orders[hero_id] = attack_spider(hero, spider, dangers, wildlife, my_mana) + "P def %d" % spider[
+                    orders[hero_id] = attack_spider(hero, spider, dangers, wildlife, my_mana) + " P def %d" % spider[
                         'id']
                 for j in range(i):
                     # If the spider has a shield or if we have low mana, the hero will target it : we skip this loop
