@@ -3,6 +3,14 @@ from math import sqrt, cos, sin, pi, floor
 # from traceback import format_exc
 from random import random, seed
 
+########################################
+#                                      #
+#            PUSHY PUSHER              #
+#                                      #
+########################################
+# Same as main but there is one defender
+# TODO fix defender not working properly : he goes too far away
+
 # Game statement for GitHub copilot
 GAME_STATEMENT = """
 # The Goal
@@ -154,11 +162,16 @@ ENEMY = 2
 NEUTRAL = 0
 
 # Algorithm Constants
-ROUND_ERROR = 1
-RANDOM_SEARCH_RANGE = HERO_VISION_RANGE / 2
-MAX_SPOT_RANGE = HERO_VISION_RANGE * 1.5
 INFINITY = 10e10
+ROUND_ERROR = 1
+RANDOM_SEARCH_RANGE = BASE_VISION_RANGE
+MAX_SPOT_RANGE = HERO_VISION_RANGE * INFINITY
 MIN_COMFY_MANA = 100
+MAX_DEFENDER_DISTANCE = BASE_THRESHOLD_RANGE * 1.5
+DEFENDER_ID = 0
+MAX_FARM_DIST = 2 * HERO_SPEED
+report = ""
+turn = 0
 
 
 # ------ Utility Functions ------ #
@@ -354,10 +367,14 @@ def get_spot(_id):
 
 def scout(hero, hero_choice, mana):
     # Default hero behavior
+    global report
     spot_x, spot_y = get_spot(hero['id'])
     for target in hero_choice:
-        if dist(spot_x, spot_y, target) <= MAX_SPOT_RANGE:
+        if dist(spot_x, spot_y, target) <= MAX_SPOT_RANGE and not target['attackers'] or dist(hero,
+                                                                                              target) <= MAX_FARM_DIST:
             # If no threat get the wild mana by killing neutral spiders
+            # Should not happen in this function, error
+            report += "/!\\ /!\\ available target in scout at turn %d\n" % turn
             target["attackers"].append(hero)
             return attack_spider(hero, target, hero_choice, mana) + " farm %d" % target['id']
 
@@ -380,10 +397,9 @@ def attack_base(spider):
 
 # ----- Game Functions End ------ #
 
-
 # --------- Main Loop --------- #
 def main():
-    turn = 0
+    global turn, report
     while True:
         turn += 1
         # health: Your base health
@@ -425,12 +441,14 @@ def main():
         # Enemies are sort by priority and distance for each hero
         for hero in heroes:
             d = spiders.copy()
+            if hero['id'] % 3 == DEFENDER_ID:
+                d = list(filter(lambda s: dist(s, base) < MAX_DEFENDER_DISTANCE, d))
             d.sort(key=target_cost_key(hero))
             heroes_choices.append(d)
 
         # Sort hero by distance to their closest target so that no hero targets a spider that is closer to another
-        if spiders:
-            heroes.sort(key=lambda h: dist(heroes_choices[h["id"] % 3][0], h))
+        heroes.sort(
+            key=lambda h: dist(heroes_choices[h["id"] % 3][0], h) if len(heroes_choices[h["id"] % 3]) else INFINITY)
 
         # The heroes try to target different spiders
         for i in range(heroes_per_player):
@@ -450,7 +468,16 @@ def main():
                     break
                 if spider_target["attackers"]:
                     for attacker in spider_target["attackers"]:
-                        assert dist(attacker, spider_target) <= dist(spider_target, hero)
+                        if not dist(attacker, spider_target) <= dist(spider_target, hero):
+                            # Error, it's not supposed to happen
+                            report += "\n/!\\ /!\\ /!\\/!\\ /!\\ /!\\/!\\ /!\\ /!\\ \n " \
+                                      "ERROR at turn {}, spider {} is targeted by {} but {} is closer".format(turn,
+                                                                                                              spider_target[
+                                                                                                                  "id"],
+                                                                                                              attacker[
+                                                                                                                  "id"],
+                                                                                                              hero[
+                                                                                                                  "id"])
 
                 else:
                     # If no ally is already targeting the spider, we target it
@@ -469,19 +496,19 @@ def main():
                         # sort the other heroes by their minimum target cost, spider_target excluded
                         h_choices = heroes_choices[h["id"] % 3]
                         cost_fun = target_cost_key(h)
+                        if not h_choices:
+                            return [INFINITY]
                         return min([INFINITY] if s == spider_target else cost_fun(s) for s in h_choices)
 
                     # debug(list(map(sort_key, heroes)))
                     heroes.sort(key=sort_key)
 
-                    debug("break")
                     break
             else:
                 # If no spider is targeted, we scout
-                debug("scout")
                 orders[hero_id] = scout(hero, heroes_choices[hero_id], my_mana)
-
-        debug(*[debug_small(h) for h in heroes])
+        if report:
+            debug(report)
         for i in range(heroes_per_player):
             print("{} {}".format(orders[i % heroes_per_player], "[%d]" % (i % 3)))
 
