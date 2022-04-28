@@ -117,6 +117,7 @@ Response time for the first turn ≤ 1000ms
 """
 
 # TODO :
+#  - Patrol far away from allies instead of random
 #  - Augmenter la portée de scouting (tests)
 #  - Fix le fait qu'ils s'éloignent trop de la base
 #  - Reduce mana when a spell is used
@@ -153,12 +154,29 @@ ALLY = 1
 ENEMY = 2
 NEUTRAL = 0
 
+# --------- First turn input --------- #
+base_x, base_y = [int(i) for i in input().split()]
+base = {'x': base_x, 'y': base_y}
+enemy_base = {'x': MAX_X - base_x, 'y': MAX_Y - base_y}
+heroes_per_player = int(input())  # Always 3
+
 # Algorithm Constants
-ROUND_ERROR = 1
-RANDOM_SEARCH_RANGE = HERO_VISION_RANGE / 2
-MAX_SPOT_RANGE = HERO_VISION_RANGE * 1.5
 INFINITY = 10e10
+ROUND_ERROR = 1
+DEFENDERS_ID = [0, 1, 2]
+PATROL_RANGE = BASE_VISION_RANGE + HERO_VISION_RANGE
+RANDOM_SEARCH_RANGE = [BASE_VISION_RANGE] * heroes_per_player
+MAX_SPOT_RANGE = [INFINITY] * heroes_per_player
+for d_id in DEFENDERS_ID:
+    RANDOM_SEARCH_RANGE[d_id] = HERO_VISION_RANGE
+    MAX_SPOT_RANGE[d_id] = BASE_THRESHOLD_RANGE + 2 * HERO_VISION_RANGE
 MIN_COMFY_MANA = 100
+MAX_DEFENDER_DISTANCE = BASE_THRESHOLD_RANGE + 2 * HERO_VISION_RANGE
+MAX_FARM_DIST = 2 * HERO_SPEED
+WIND_ONLY_NEAR_BASE = True
+WIND_THRESHOLD = BASE_VISION_RANGE + HERO_VISION_RANGE
+report = ""
+turn = 0
 
 
 # ------ Utility Functions ------ #
@@ -194,6 +212,7 @@ def normalize_vector(x, y):
     return x / length, y / length
 
 
+@wrapper
 def rotate_vector(x, y, angle):
     return x * cos(angle) - y * sin(angle), x * sin(angle) + y * cos(angle)
 
@@ -234,18 +253,9 @@ def round_vector(x, y):
 
 
 """ arguments : segment start, segment end, point """
+
+
 # ------ End of Utility Functions ------ #
-
-
-# --------- First turn input --------- #
-base_x, base_y = [int(i) for i in input().split()]
-base = {'x': base_x, 'y': base_y}
-enemy_base = {'x': MAX_X - base_x, 'y': MAX_Y - base_y}
-heroes_per_player = int(input())  # Always 3
-_direction = 1 if enemy_base['x'] > base['x'] else -1
-
-
-# ----- End of first turn input ------ #
 
 
 # --------- Game Functions --------- #
@@ -305,7 +315,8 @@ def attack_spider(hero, spider, other_spiders, mana):
     if is_fatal(spider):
         debug("%d : shit ! %d" % (hero['id'], spider['id']))
     # if we have enough mana get more wild mana
-    if (mana > MIN_COMFY_MANA or is_fatal(spider)) and not spider[
+    if (mana > MIN_COMFY_MANA and (dist_to_base < WIND_THRESHOLD or not WIND_ONLY_NEAR_BASE) or is_fatal(
+            spider)) and not spider[
         "shield_life"] and dist_to_base > BASE_THRESHOLD_RANGE - WIND_DISTANCE + ROUND_ERROR and \
             spider_dist + ROUND_ERROR <= SPELL_RANGES[WIND]:
         return defense_wind(spider, hero)
@@ -327,13 +338,6 @@ def attack_spider(hero, spider, other_spiders, mana):
     for target in targets:
         target_point = closest_target_point(hero, spider, target)
         if dist(target_point, hero) + ROUND_ERROR <= HERO_SPEED:
-            debug("{} optimize {} by adding {}dist_to_spider :{}, dist_to_other: {}\n".format(debug_small(hero),
-                                                                                              debug_small(spider),
-                                                                                              debug_small(target),
-                                                                                              round(dist(target_point,
-                                                                                                         spider), 2),
-                                                                                              round(dist(target_point,
-                                                                                                         target), 2)))
             return move_to(target_point) + " opt"
     # If no secondary target is found, just move normally to the spider
     # todo? optimize move to
@@ -348,25 +352,41 @@ def get_spot_direction(_id):
 
 def get_spot(_id):
     # Observation spot foreach hero
+    if _id in DEFENDERS_ID:
+        return base['x'], base['y']
     dir_x, dir_y = get_spot_direction(_id)
     return base_x + dir_x * BASE_VISION_RANGE, base_y + dir_y * BASE_VISION_RANGE
 
 
+def patrol(defender):
+    init_dir = get_spot_direction(0)
+    random_theta = random() * 4 * pi / 5 - 2 * pi / 5
+    dir_x, dir_y = rotate_vector(init_dir[0], init_dir[1], random_theta)
+    return PATROL_RANGE * dir_x + base_x, PATROL_RANGE * dir_y + base_y
+
+
 def scout(hero, hero_choice, mana):
     # Default hero behavior
+    global report
     spot_x, spot_y = get_spot(hero['id'])
     for target in hero_choice:
-        if dist(spot_x, spot_y, target) <= MAX_SPOT_RANGE:
+        if dist(spot_x, spot_y, target) <= MAX_SPOT_RANGE[hero['id'] % 3] and not target['attackers'] or dist(hero,
+                                                                                                              target) <= MAX_FARM_DIST:
             # If no threat get the wild mana by killing neutral spiders
+            # Should not happen in this function, error
+            report += "/!\\ /!\\ available target in scout at turn %d\n" % turn
             target["attackers"].append(hero)
             return attack_spider(hero, target, hero_choice, mana) + " farm %d" % target['id']
 
     # Else move randomly around the observation post
+    if hero['id'] % 3 in DEFENDERS_ID:
+        return move_to(patrol(hero)) + " patrol"
+
     random_theta = random() * pi - pi / 2
     dir_x, dir_y = get_spot_direction(hero['id'])
     random_dx, random_dy = rotate_vector(dir_x, dir_y, random_theta)
-    final_x = spot_x + random_dx * RANDOM_SEARCH_RANGE
-    final_y = spot_y + random_dy * RANDOM_SEARCH_RANGE
+    final_x = spot_x + random_dx * RANDOM_SEARCH_RANGE[hero['id'] % 3]
+    final_y = spot_y + random_dy * RANDOM_SEARCH_RANGE[hero['id'] % 3]
     return move_to(final_x, final_y) + " scout"
 
 
@@ -383,7 +403,7 @@ def attack_base(spider):
 
 # --------- Main Loop --------- #
 def main():
-    turn = 0
+    global turn, report
     while True:
         turn += 1
         # health: Your base health
@@ -417,20 +437,24 @@ def main():
                 spiders.append(entity)
         # The closer an entity is the higher danger it is
         # TODO? : more complex threat evaluation (use health maybe)
-        heroes_choices = []
+        heroes_choices = [[]] * heroes_per_player
         chosen = [10e10] * heroes_per_player
         orders = ["WAIT (Controlled)"] * heroes_per_player
         # debug([debug_small(h) for h in heroes])
         # - debug("scout orders : {}".format(orders))
         # Enemies are sort by priority and distance for each hero
+        defenders = []
         for hero in heroes:
             d = spiders.copy()
+            if hero['id'] % 3 in DEFENDERS_ID:
+                defenders.append(hero)
+                d = list(filter(lambda s: dist(s, base) < MAX_DEFENDER_DISTANCE, d))
             d.sort(key=target_cost_key(hero))
-            heroes_choices.append(d)
+            heroes_choices[hero['id'] % 3] = d
 
         # Sort hero by distance to their closest target so that no hero targets a spider that is closer to another
-        if spiders:
-            heroes.sort(key=lambda h: dist(heroes_choices[h["id"] % 3][0], h))
+        heroes.sort(
+            key=lambda h: dist(heroes_choices[h["id"] % 3][0], h) if len(heroes_choices[h["id"] % 3]) else INFINITY)
 
         # The heroes try to target different spiders
         for i in range(heroes_per_player):
@@ -450,7 +474,16 @@ def main():
                     break
                 if spider_target["attackers"]:
                     for attacker in spider_target["attackers"]:
-                        assert dist(attacker, spider_target) <= dist(spider_target, hero)
+                        if not dist(attacker, spider_target) <= dist(spider_target, hero):
+                            # Error, it's not supposed to happen
+                            report += "\n/!\\ /!\\ /!\\/!\\ /!\\ /!\\/!\\ /!\\ /!\\ \n " \
+                                      "ERROR at turn {}, spider {} is targeted by {} but {} is closer".format(turn,
+                                                                                                              spider_target[
+                                                                                                                  "id"],
+                                                                                                              attacker[
+                                                                                                                  "id"],
+                                                                                                              hero[
+                                                                                                                  "id"])
 
                 else:
                     # If no ally is already targeting the spider, we target it
@@ -469,19 +502,25 @@ def main():
                         # sort the other heroes by their minimum target cost, spider_target excluded
                         h_choices = heroes_choices[h["id"] % 3]
                         cost_fun = target_cost_key(h)
+                        if not h_choices:
+                            return [INFINITY]
                         return min([INFINITY] if s == spider_target else cost_fun(s) for s in h_choices)
 
                     # debug(list(map(sort_key, heroes)))
                     heroes.sort(key=sort_key)
 
-                    debug("break")
                     break
             else:
                 # If no spider is targeted, we scout
-                debug("scout")
                 orders[hero_id] = scout(hero, heroes_choices[hero_id], my_mana)
-
-        debug(*[debug_small(h) for h in heroes])
+        if report:
+            debug(report)
+        for defender in defenders:
+            db = int(dist(defender, base))
+            if db > MAX_DEFENDER_DISTANCE:
+                debug("ERROR: defender {} is too far from base".format(defender["id"]))
+            else:
+                debug("Defender dist to base : {}/{}".format(db, MAX_DEFENDER_DISTANCE))
         for i in range(heroes_per_player):
             print("{} {}".format(orders[i % heroes_per_player], "[%d]" % (i % 3)))
 
