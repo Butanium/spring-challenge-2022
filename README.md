@@ -1,12 +1,12 @@
 # Spring Challenge 2022
 
-My Python submission for this [codingame challenge](https://www.codingame.com/ide/challenge/spring-challenge-2022)
+My Python bot for the [codingame spring challenge 2002](https://www.codingame.com/ide/challenge/spring-challenge-2022)
 
-## What's done ?
+## Bot description
 
-For now, I only implemented naive defense which doesn't care about the enemy.
+This bot tries to defend the base by tracking enemy attackers. I wanted to do something different from just 2 defenders
+and an attacker which seems to be the meta.
 
-## What's next ?
+The bot can be very good if it successfully pushes spiders far away from the attacker.
 
-- Make an adaptative defense that can handle attackers
-- Attack the enemy with mana advantage or optimize wild mana gain 
+If it is pushed too hard it has to defend inside the base and loose a lot of wild mana.

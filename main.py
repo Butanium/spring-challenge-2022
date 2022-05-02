@@ -117,9 +117,8 @@ Response time for the first turn ≤ 1000ms
 
 # TODO :
 #  - Don't track 2 times close enemies
-#  - Allow emergency defense for tracker
-#  - Augmenter la portée de scouting (tests)
-#  - Test with less defenders
+#  - Allow critical defense for tracker
+#  - Update enemy position when they get winded
 #  - Add defensive spell usage :
 #          * SHIELD for attacked heroes
 #          *? SHIELD for secured spiders
@@ -185,26 +184,30 @@ heroes_per_player = int(input())  # Always 3
 # Algorithm Constants and global variables
 INFINITY = 10e10
 ROUND_ERROR = 1
-DEFENDERS_ID = [0, 1, 2]
 SCOUT = 0
+MIN_COMFY_MANA = 200
 DEFENDER = 1
 TRACKER = 2
 PATROL_RANGE = BASE_VISION_RANGE + HERO_VISION_RANGE
-RANDOM_SEARCH_RANGE = [BASE_THRESHOLD_RANGE, HERO_VISION_RANGE, HERO_VISION_RANGE / 2]
-MAX_SPOT_RANGE = [BASE_THRESHOLD_RANGE, BASE_THRESHOLD_RANGE + 2 * HERO_VISION_RANGE, HERO_VISION_RANGE / 2]
-MIN_COMFY_MANA = 200
+RANDOM_SEARCH_RANGE = [2.5 * HERO_VISION_RANGE, HERO_VISION_RANGE, HERO_VISION_RANGE / 2]
+MAX_SPOT_RANGE = [BASE_THRESHOLD_RANGE + 4 * HERO_VISION_RANGE, BASE_THRESHOLD_RANGE + 2 * HERO_VISION_RANGE,
+                  HERO_VISION_RANGE - 2 * HERO_SPEED]
 MAX_DEFENDER_DISTANCE = BASE_THRESHOLD_RANGE + 2 * HERO_VISION_RANGE
 # If you are closer than this distance to a monster, farm it even if he is already attacked
 MAX_FARM_DIST = 2 * HERO_SPEED
 WIND_ONLY_NEAR_BASE = True
 WIND_THRESHOLD = BASE_VISION_RANGE + HERO_VISION_RANGE
-TRACK_THRESHOLD = BASE_VISION_RANGE + 2 * HERO_VISION_RANGE
+TRACK_THRESHOLD = BASE_THRESHOLD_RANGE + 1.5 * HERO_VISION_RANGE
 TRACKER_RANGE = HERO_VISION_RANGE
 ATTACKER_THRESHOLD = HERO_VISION_RANGE + HERO_SPEED
-MAX_DIST_TO_ATTACKER = HERO_VISION_RANGE * 2
+MAX_DIST_TO_ATTACKER = SPELL_RANGES[WIND] + HERO_SPEED + SPIDER_SPEED
 # If one of our hero is closer than this distance to an entity that is supposed to be here and that is not seen,
 # we delete it
 MAX_DOUBT_DIST = HERO_VISION_RANGE * 0.75
+# If we have more than this amount of mana, our hero will control attacker if he needs to get closer to him
+MIN_MANA_FOR_CONTROL_TRACKING = 50
+# If a spider is within this range of a base, even trackers will accept to target it if there are no allies near it
+CRITICAL_RANGE = WIND_DISTANCE + 2 * SPIDER_SPEED
 
 # -------- Global variables -------- #
 report = ""
@@ -212,6 +215,8 @@ turn = 0
 mana = 0
 current_objective = [[]] * heroes_per_player
 tracking: dict[Entity: Entity] = {}
+defenders_id = []
+min_comfy_mana = 200
 
 
 # Key : tracker ally, value : tracked enemy
@@ -255,6 +260,15 @@ def wrapper(func):
         return func(*res, **kwargs)
 
     return result
+
+
+def to_tuple(arg):
+    if type(arg) == dict:
+        return arg['x'], arg['y']
+    elif isinstance(arg, Entity):
+        return arg.x, arg.y
+    else:
+        return arg[0], arg[1]
 
 
 # ~~ Vector functions ~~ #
@@ -325,6 +339,12 @@ def clamp_to_map(x, y):
 @wrapper
 def move_to(x, y):
     return "MOVE {} {}".format(round(x), round(y))
+
+
+def partial_move_to(hero, target, distance):
+    direction = get_direction(hero, target)
+    dx, dy = scale_vector(direction, distance)
+    return move_to(hero.x + dx, hero.y + dy) + " 2far"
 
 
 def closest_target_point(hero, primary_target, secondary_target):
@@ -422,6 +442,10 @@ def is_fatal(spider):
     return spider.health - t * HERO_DPS >= 0
 
 
+def is_critical(spider):
+    return is_attacking_base(spider) and (dist(base, spider) <= CRITICAL_RANGE or bool(spider.shield_life))
+
+
 def dist_to_closest_attacker(spider, ammo_spiders):
     if spider not in ammo_spiders.keys():
         return INFINITY
@@ -436,13 +460,13 @@ def target_cost_key(hero, ammo_spiders: dict):
         if spider in ammo_spiders.keys():
             attackers = ammo_spiders[spider]
             d_min = min(dist(spider, a) for a in attackers)
-            return [0,
+            return [-is_critical(spider) if threat == ALLY else 0,
                     d_min > ATTACKER_THRESHOLD,
                     time_to_base if near_my_base else INFINITY,
                     d_min,
                     int(dist(spider, hero))
                     ]
-        return [0 if threat == ALLY else (1 if threat == NEUTRAL else 2),
+        return [-is_critical(spider) if threat == ALLY else (1 if threat == NEUTRAL else 2),
                 2 if threat == ENEMY else 1 - spider.near_base,
                 time_to_base if near_my_base else INFINITY,
                 INFINITY,  # cannot be used as an ammo
@@ -451,6 +475,7 @@ def target_cost_key(hero, ammo_spiders: dict):
     return key
 
 
+@wrapper_id
 @wrapper
 def control_entity(_id, end_x, end_y):
     """ arguments : spider id, direction x, direction y """
@@ -485,36 +510,39 @@ def attack_spider(hero, spider, other_spiders, ammo_spiders):
         debug("%d : shit ! %d" % (hero.id, spider.id))
     # if we have enough mana get more wild mana
 
-    if ((mana > MIN_COMFY_MANA or dist_to_closest_attacker(spider, ammo_spiders) <= MAX_DIST_TO_ATTACKER) and (
-            dist_to_base < WIND_THRESHOLD or not WIND_ONLY_NEAR_BASE) or is_fatal(
-        spider)) and not spider.shield_life and dist_to_base > BASE_THRESHOLD_RANGE - WIND_DISTANCE + ROUND_ERROR and \
+    if ((mana > min_comfy_mana or dist_to_closest_attacker(spider, ammo_spiders) <= MAX_DIST_TO_ATTACKER)
+        and (dist_to_base < WIND_THRESHOLD or not WIND_ONLY_NEAR_BASE) or is_fatal(spider)) \
+            and not spider.shield_life and dist_to_base > ceil(BASE_THRESHOLD_RANGE - WIND_DISTANCE) and \
             spider_dist + ROUND_ERROR <= SPELL_RANGES[WIND] and mana >= SPELL_COSTS[WIND]:
-        return defense_wind(spider, hero)
-    if is_fatal(spider) and not spider.shield_life and spider_dist + ROUND_ERROR <= MAX_SPELL_RANGE and mana >= 10:
-        if spider_dist <= SPELL_RANGES[WIND] - ROUND_ERROR:
+        return defense_wind(spider, hero) + (" wcomfy" if mana > min_comfy_mana else " wtrack")
+    if (dist_to_closest_attacker(spider, ammo_spiders) <= SPELL_RANGES[WIND] or is_fatal(
+            spider)) and not spider.shield_life and ceil(spider_dist) <= MAX_SPELL_RANGE and mana >= \
+            SPELL_COSTS[WIND]:
+        if ceil(spider_dist) <= SPELL_RANGES[WIND]:
             # Use wind if the spider is close enough
-            return defense_wind(spider, hero)
-        elif spider_dist > SPELL_RANGES[WIND] - ROUND_ERROR + HERO_SPEED and time_to(spider) == 2:
-            # Control if the spider is very close to the base and too far to use wind
-            return defense_control(spider)
+            return defense_wind(spider, hero) + " wclose"
+        # elif spider_dist > SPELL_RANGES[WIND] - ROUND_ERROR + HERO_SPEED and time_to(spider) == 2:
+        #     # Control if the spider is very close to the base and too far to use wind
+        #     return defense_control(spider)
 
     if spider_dist > HERO_SPEED:
-        direction = get_direction(hero, spider)
         spot = get_spot(hero.id)
         role = get_role(hero)
         # if the spider is too far away from the spot and that the hero is close to the spot, stay closer to the spot
-        if dist(spider, spot) > MAX_SPOT_RANGE[role] >= dist(hero, spot):
-            debug(f"spot: {spot} role: {role} id: {hero.id}")
-            dx, dy = scale_vector(direction, MAX_SPOT_RANGE[role] - dist(hero, spot))
-            return move_to(hero.x + dx, hero.y + dy) + " 2far"
+        if dist(spider, spot) > MAX_SPOT_RANGE[role] >= dist(hero, spot) and not is_critical(spider):
+            # debug(f"spot: {spot} role: {role} id: {hero.id}")
+            partial_move_to(hero, spider, MAX_SPOT_RANGE[role] - dist(hero, spot))
         else:
             return move_to(spider)
     # Tries to find a secondary target to attack at the same time as the spider
-    filtre = lambda s: dist(s, spider) <= 2 * HERO_ATTACK_RANGE - 2 * ROUND_ERROR and spider.id != s.id
+    filtre = lambda s: ceil(dist(s, spider)) <= 2 * HERO_ATTACK_RANGE and spider.id != s.id
 
     targets = list(filter(filtre, other_spiders))
     targets.sort(key=target_cost_key(hero, ammo_spiders))
     for target in targets:
+        if is_fatal(target) and ceil(dist(target, hero)) <= SPELL_RANGES[WIND] and mana >= SPELL_COSTS[WIND] and not \
+                target.shield_life:
+            return defense_wind(target, hero) + " optwind"
         target_point = closest_target_point(hero, spider, target)
         if dist(target_point, hero) + ROUND_ERROR <= HERO_SPEED:
             return move_to(target_point) + " opt"
@@ -531,47 +559,41 @@ def get_spot_direction(_id):
 
 def get_spot(_id, ignore_role=False):
     # Observation spot foreach hero
-    if _id in DEFENDERS_ID and not ignore_role:
-        return base.x, base.y
     if is_tracking(_id) and not ignore_role:
         return get_tracked_target(_id)
-    dir_x, dir_y = get_spot_direction(_id)
+    if not ignore_role:
+        return base.x, base.y
+    dir_x, dir_y = get_spot_direction(_id % 3)
     return base_x + dir_x * BASE_VISION_RANGE, base_y + dir_y * BASE_VISION_RANGE
 
 
 spots = [get_spot(i, ignore_role=True) for i in range(3)]
 
 
-def patrol(defender, heroes):
+def is_valid_spot(spot, hero, allies):
+    d_me = dist(spot, hero)
+    for ally in allies:
+        objective = current_objective[ally.id3]
+        if objective and ally.id != hero.id and int(dist(spot, ally)) <= int(d_me) and \
+                dist(objective[0], spot) <= HERO_VISION_RANGE:
+            return False
+    return True
+
+
+def patrol(hero, allies):
     def spot_score(spot):
-        return sum(dist(spot, hero) for hero in heroes if hero.id != defender.id) - dist(spot, defender) / 2
+        return sum(dist(spot, ally) for ally in allies if ally.id != hero.id) - dist(spot, hero) / 2
 
-    # debug(f"{defender.id}")
+    role = get_role(hero)
 
-    def is_valid_spot(spot):
-        d_me = dist(spot, defender)
-
-        for hero in heroes:
-            objective = current_objective[hero.id3]
-            if objective and hero.id != defender.id and int(dist(spot, hero)) <= int(d_me) and \
-                    dist(objective[0], spot) <= RANDOM_SEARCH_RANGE[DEFENDER] / 2:
-                # debug("Patrol spot rejected: {}, by {}, objective:{}".format(spot, hero.id, objective))
-                # debug("dist(spot, hero):{} < d_me:{}, dist(objective[0], spot):{} <= {}".format(dist(spot, hero), d_me,
-                #                                                                                 dist(objective[0],
-                #                                                                                      spot),
-                #                                                                                 RANDOM_SEARCH_RANGE[
-                #                                                                                     DEFENDER]))
-                return False
-        return True
-
-    best_spot = max((spot for spot in spots if is_valid_spot(spot)), key=spot_score)
-    if dist(best_spot, defender) > 2 * HERO_SPEED:
+    best_spot = max((spot for spot in spots if is_valid_spot(spot, hero, allies)), key=spot_score)
+    if dist(best_spot, hero) > 2 * HERO_SPEED:
         return best_spot
     init_dir = get_direction(base, best_spot)
     random_theta = random() * pi - pi / 2
     dir_x, dir_y = rotate_vector(init_dir[0], init_dir[1], random_theta)
-    x = RANDOM_SEARCH_RANGE[DEFENDER] * dir_x + best_spot[0]
-    y = RANDOM_SEARCH_RANGE[DEFENDER] * dir_y + best_spot[1]
+    x = RANDOM_SEARCH_RANGE[role] * dir_x + best_spot[0]
+    y = RANDOM_SEARCH_RANGE[role] * dir_y + best_spot[1]
     return x, y
 
 
@@ -579,7 +601,7 @@ def patrol(defender, heroes):
 def get_role(hero_id):
     if is_tracking(hero_id):
         return TRACKER
-    if hero_id % 3 in DEFENDERS_ID:
+    if hero_id % 3 in defenders_id:
         return DEFENDER
     return SCOUT
 
@@ -587,55 +609,53 @@ def get_role(hero_id):
 def scout(hero, hero_choice, heroes, ammo_spiders):
     # Default hero behavior
     global report
-    hero_id = hero.id % 3
-    spot_x, spot_y = get_spot(hero_id)
+    spot = get_spot(hero.id)
     role = get_role(hero)
-    for target in hero_choice:
-        if dist(spot_x, spot_y, target) <= MAX_SPOT_RANGE[role] and (not target.attackers or
-                                                                     dist(hero, target) <= MAX_FARM_DIST):
+    targets = filter(lambda t: dist(spot, t) <= MAX_SPOT_RANGE[role], hero_choice)
+    for target in targets:
+        if not target.attackers or dist(hero, target) <= MAX_FARM_DIST:
             # If no threat get the wild mana by killing neutral spiders
-            # Should not happen in this function, error
-            # todo fix warning
-            if "scout" not in report:
-                report += "WARNING available target in scout at turn %d\n" % turn
             target.attackers.append(hero)
             return attack_spider(hero, target, hero_choice, ammo_spiders) + " farm %d" % target.id
+    if is_tracking(hero):
+        if hero_choice:
+            return attack_spider(hero, hero_choice[0], hero_choice, ammo_spiders) + " trackattack"
+        else:
+            return move_to(spot) + " track"
 
-    # Else move to a random point near the observation spot
-    if current_objective[hero_id]:
-        objective, order = current_objective[hero_id]
+    if current_objective[hero.id3] and is_valid_spot(current_objective[hero.id3][0], hero, heroes):
+        objective, order = current_objective[hero.id3]
         if dist(objective, hero) >= HERO_SPEED:
-            return order
+            return order + " keepgoing"
+    objective = clamp_to_map(patrol(hero, heroes))
+    order = move_to(objective)
+    current_objective[hero.id3] = (objective, order)
+    return order + " newpatrol"
 
-    if hero_id in DEFENDERS_ID:
-        objective = clamp_to_map(patrol(hero, heroes))
-        order = move_to(objective) + " patrol"
-        current_objective[hero_id] = (objective, order)
-        return order
-
-    random_theta = random() * pi - pi / 2
-    dir_x, dir_y = get_spot_direction(hero_id)
-    random_dx, random_dy = rotate_vector(dir_x, dir_y, random_theta)
-    final_x = spot_x + random_dx * RANDOM_SEARCH_RANGE[SCOUT]
-    final_y = spot_y + random_dy * RANDOM_SEARCH_RANGE[SCOUT]
-    order = move_to(final_x, final_y) + " scout"
-    current_objective[hero_id] = clamp_to_map(final_x, final_y), order
-    return order
+    # random_theta = random() * pi - pi / 2
+    # dir_x, dir_y = get_spot_direction(hero_id)
+    # random_dx, random_dy = rotate_vector(dir_x, dir_y, random_theta)
+    # final_x = spot_x + random_dx * RANDOM_SEARCH_RANGE[SCOUT]
+    # final_y = spot_y + random_dy * RANDOM_SEARCH_RANGE[SCOUT]
+    # order = move_to(final_x, final_y) + " scout"
+    # current_objective[hero_id] = clamp_to_map(final_x, final_y), order
+    # return order
 
 
 def debug_small(entity):
     return "id : {} x : {} y : {}\n".format(entity.id, entity.x, entity.y)
 
 
-def attack_base(spider):
-    return spider.threat_for == ALLY and spider.near_base
+def is_attacking_base(spider):
+    return bool(spider.threat_for == ALLY and spider.near_base)
 
 
-def is_really_attacked(spider):
-    for hero in spider.attackers:
-        if get_role(hero) != TRACKER:
-            return True
-    return False
+def is_attacked(spider):
+    return bool(spider.attackers)
+    # for hero in spider.attackers:
+    #     if get_role(hero) != TRACKER:
+    #         return True
+    # return False
 
 
 # ----- Game Functions End ------ #
@@ -643,11 +663,12 @@ def is_really_attacked(spider):
 
 # --------- Main Loop --------- #
 def main():
-    global turn, report, mana
+    global turn, report, mana, defenders_id, min_comfy_mana
     turn += 1
     # health: Your base health
     # mana: Spend ten mana to cast a spell
     my_health, my_mana = [int(j) for j in input().split()]
+    min_comfy_mana = 0 if 30 * (220 - turn) <= my_mana else MIN_COMFY_MANA
     mana = my_mana
     # opponent_health, opponent_mana = [int(j) for j in input().split()]
     _ = input()  # ignore opponent_mana and opponent_health
@@ -661,6 +682,10 @@ def main():
     enemy_heroes = []
     # Enemy heroes attacking us
     attackers = []
+    # Spiders that are very dangerous
+    critical_spiders = []
+
+    entity_by_id = {}
     for i in range(entity_count):
         # _id: Unique identifier
         # _type: 0=spider, 1=your hero, 2=opponent hero
@@ -677,48 +702,61 @@ def main():
         entity = Entity(_id=_id, _type=_type, is_controlled=is_controlled, health=health, x=x, y=y, near_base=near_base,
                         threat_for=threat_for, vx=vx, vy=vy, shield_life=shield_life, attackers=[], id3=_id % 3)
         entities.append(entity)
+        entity_by_id[_id] = entity
         if _type == 1:
             heroes.append(entity)
         elif _type == 0:
             spiders.append(entity)
+            if is_critical(entity):
+                critical_spiders.append(entity)
         else:
             enemy_heroes.append(entity)
             if dist(base, entity) <= TRACK_THRESHOLD:
                 attackers.append(entity)
             else:
                 untrack(entity)
-
     heroes_choices: list[list[Entity]] = [[]] * heroes_per_player
+    heroes_secondary_choices: list[list[Entity]] = [[]] * heroes_per_player
     chosen = [10e10] * heroes_per_player
     orders = ["WAIT (Controlled)"] * heroes_per_player
     clean_tracking(heroes, enemy_heroes)
+    # If no attack just farm
+    if tracking == {}:
+        defenders_id = [min(heroes, key=lambda h: dist(h, base)).id3]
+    else:
+        defenders_id = [0, 1, 2]
+
     for attacker in attackers:
         if not is_tracked(attacker):
             track(attacker, heroes)
         else:
             retrack(attacker, heroes)
     update_tracking(heroes)
+    # Key : Spider, Value : enemies the spider will come across
     ammo_spiders = {}
     for tracker, attacker in tracking.items():
-        assert (tracker.type == 1 and attacker.type == 2, "Tracker or attacker types are not correct")
         # Add spiders that will pass near the attacker in the ammo_spiders dict
-        choice = []
+        key = target_cost_key(tracker, ammo_spiders)
+        choice = critical_spiders.copy()
+        choice.sort(key=key)
+        heroes_choices[tracker.id3] = choice
+        secondary = []
         for spider in spiders:
             second_point = spider.x + spider.vx, spider.y + spider.vy
             closest = closest_point_of_segment(spider, second_point, attacker, is_line_after=True)
             if dist(closest, attacker) <= ATTACKER_THRESHOLD:
                 ammo_spiders.setdefault(spider, [])
                 ammo_spiders[spider].append(attacker)
-                choice.append(spider)
-        choice.sort(key=target_cost_key(tracker, ammo_spiders))
-        heroes_choices[tracker.id3] = choice
+                secondary.append(spider)
+        secondary.sort(key=key)
+        heroes_secondary_choices[tracker.id3] = secondary
 
     # Enemies are sort by priority and distance for each hero
     defenders = []
     for hero in heroes:
         if is_tracking(hero):
             continue
-        if hero.id3 in DEFENDERS_ID:
+        if hero.id3 in defenders_id:
             defenders.append(hero)
             # Only target spiders not too far away from the base if the hero is a defender
             choice = [s for s in spiders if dist(s, base) < MAX_DEFENDER_DISTANCE]
@@ -726,6 +764,7 @@ def main():
             choice = spiders.copy()
         choice.sort(key=target_cost_key(hero, ammo_spiders))
         heroes_choices[hero.id3] = choice
+        heroes_secondary_choices[hero.id3] = choice
 
     # Sort hero by distance to their closest target so that no hero targets a spider that is closer to another
     heroes.sort(
@@ -739,27 +778,19 @@ def main():
         # if hero is controlled, he can't follow the orders, just skip it
         if hero.is_controlled:
             continue
-        if is_tracking(hero):
-            debug("tracking", [is_tracking(h) for h in heroes])
-            tracked = tracking[hero]
-            if dist(tracked, hero) > MAX_SPOT_RANGE[TRACKER]:
-                orders[hero_id] = move_to(tracked) + " tracking"
-                debug(f"{hero.id} is tracking {tracked.id}")
-                continue
-            else:
-                debug(f"no track {dist(tracked, hero)} < {MAX_SPOT_RANGE[TRACKER]}")
+
         for choice in range(len(heroes_choices[hero_id])):
             spider_target: Entity = heroes_choices[hero_id][choice]
             # If the spider has a shield, target it
             # noinspection PyTypeChecker
-            if spider_target.shield_life and attack_base(spider_target):
+            if spider_target.shield_life and is_attacking_base(spider_target):
                 orders[hero_id] = attack_spider(hero, spider_target, spiders, ammo_spiders) + " P def %d" % \
                                   spider_target.id
                 spider_target.attackers.append(hero)
                 chosen[hero_id] = choice
                 break
 
-            if is_really_attacked(spider_target):
+            if is_attacked(spider_target):
                 for attacker in spider_target.attackers:
                     if not dist(attacker, spider_target) <= dist(spider_target, hero) and get_role(attacker) != TRACKER:
                         # Error, it's not supposed to happen
@@ -769,7 +800,8 @@ def main():
             else:
                 # If no ally is already targeting the spider, we target it
                 orders[hero_id] = attack_spider(hero, spider_target, spiders, ammo_spiders) + \
-                                  (" T def %d" % spider_target.id if spider_target.threat_for == ALLY else "")
+                                  (" T def %d" % spider_target.id if spider_target.threat_for == ALLY else
+                                   " prev %d" % spider_target.id if spider_target in ammo_spiders.keys() else "")
                 spider_target.attackers.append(hero)
                 chosen[hero_id] = choice
                 white_list_id = [heroes[k].id for k in range(i + 1)]
@@ -789,29 +821,44 @@ def main():
 
                 # debug(list(map(sort_key, heroes)))
                 heroes.sort(key=sort_key)
-
                 break
         else:
             # If no spider is targeted, we scout
             scouting.append(hero)
     scouting.sort(key=lambda h: dist(h, patrol(h, heroes)))
     for hero in scouting:
-        # We scout
-        hero_id = hero.id3
-        orders[hero_id] = scout(hero, heroes_choices[hero_id], heroes, ammo_spiders)
+        if is_tracking(hero):
+            tracked: Entity = tracking[hero]
+            tracked_dist = dist(tracked, hero)
+            if tracked_dist > MAX_SPOT_RANGE[TRACKER]:
+                debug(f"{hero.id} is tracking {tracked.id}")
+                if mana > MIN_MANA_FOR_CONTROL_TRACKING and not tracked.shield_life and \
+                        dist(tracked, base) < dist(hero, base):
+                    if ceil(tracked_dist) + HERO_SPEED <= SPELL_RANGES[WIND]:
+                        debug("wback info :", tracked.x, tracked.y, ceil(dist(tracked, hero)))
+                        orders[hero.id3] = defense_wind(tracked, hero) + " WBACK"
+                        continue
+                    if ceil(tracked_dist) <= SPELL_RANGES[CONTROL] and not tracked.is_controlled:
+                        orders[hero.id3] = control_entity(tracked, hero) + " COMEHERE"
+                        continue
+                orders[hero.id3] = move_to(tracked) + " tracking"
+                continue
+        orders[hero.id3] = scout(hero, heroes_secondary_choices[hero.id3], heroes,
+                                 ammo_spiders)
 
     if report:
         debug(report)
-    for defender in defenders:
-        db = int(dist(defender, base))
-        if db > MAX_DEFENDER_DISTANCE:
-            debug("ERROR: defender {} is too far from base".format(defender.id))
-        elif "ERROR" in report:
-            debug("Defender dist to base : {}/{}".format(db, MAX_DEFENDER_DISTANCE))
     debug([f"{att.id} track {t.id}, dist:{int(dist(att, t))}/{TRACKER_RANGE}" for att, t in tracking.items()])
-    debug([is_tracking(h) for h in heroes])
+    debug("defenders", defenders_id)
+    debug("ammos", [s.id for s in ammo_spiders.keys()])
+    if critical_spiders:
+        debug("critical spiders", [s.id for s in critical_spiders])
     for i in range(heroes_per_player):
-        print("{} {}".format(orders[i], "[%s%d]" % ("T" if is_tracking(i) else "", i + 3 if heroes[0].id >= 3 else i)))
+        hero_id = i + 3 if heroes[0].id >= 3 else i
+        debug("hero %d choice :" % hero_id,
+              [s.id for s in heroes_choices[i]], [s.id for s in heroes_secondary_choices[i]])
+        print("{} {}".format(orders[i],
+                             "[%s%d]" % ("T" if is_tracking(hero_id) else "D" if i in defenders_id else "S", hero_id)))
 
 
 while True:
