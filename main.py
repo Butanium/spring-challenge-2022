@@ -100,12 +100,11 @@ report = ""
 turn = 0
 mana = 0
 current_objective = [[]] * heroes_per_player
-tracking: dict[Entity: Entity] = {}
 defenders_id = []
 min_comfy_mana = 200
-
-
 # Key : tracker ally, value : tracked enemy
+tracking: dict[Entity: Entity] = {}
+
 
 
 # ------ Utility Functions ------ #
