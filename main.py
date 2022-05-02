@@ -148,15 +148,6 @@ def wrapper(func):
     return result
 
 
-def to_tuple(arg):
-    if type(arg) == dict:
-        return arg['x'], arg['y']
-    elif isinstance(arg, Entity):
-        return arg.x, arg.y
-    else:
-        return arg[0], arg[1]
-
-
 # ~~ Vector functions ~~ #
 
 @wrapper
@@ -521,15 +512,6 @@ def scout(hero, hero_choice, heroes, ammo_spiders):
     current_objective[hero.id3] = (objective, order)
     return order + " newpatrol"
 
-    # random_theta = random() * pi - pi / 2
-    # dir_x, dir_y = get_spot_direction(hero_id)
-    # random_dx, random_dy = rotate_vector(dir_x, dir_y, random_theta)
-    # final_x = spot_x + random_dx * RANDOM_SEARCH_RANGE[SCOUT]
-    # final_y = spot_y + random_dy * RANDOM_SEARCH_RANGE[SCOUT]
-    # order = move_to(final_x, final_y) + " scout"
-    # current_objective[hero_id] = clamp_to_map(final_x, final_y), order
-    # return order
-
 
 def debug_small(entity):
     return "id : {} x : {} y : {}\n".format(entity.id, entity.x, entity.y)
@@ -541,10 +523,6 @@ def is_attacking_base(spider):
 
 def is_attacked(spider):
     return bool(spider.attackers)
-    # for hero in spider.attackers:
-    #     if get_role(hero) != TRACKER:
-    #         return True
-    # return False
 
 
 # ----- Game Functions End ------ #
@@ -734,7 +712,7 @@ def main():
                 continue
         orders[hero.id3] = scout(hero, heroes_secondary_choices[hero.id3], heroes,
                                  ammo_spiders)
-
+    # Debugging
     if report:
         debug(report)
     debug([f"{att.id} track {t.id}, dist:{int(dist(att, t))}/{TRACKER_RANGE}" for att, t in tracking.items()])
@@ -742,6 +720,8 @@ def main():
     debug("ammos", [s.id for s in ammo_spiders.keys()])
     if critical_spiders:
         debug("critical spiders", [s.id for s in critical_spiders])
+
+    # Send orders
     for i in range(heroes_per_player):
         hero_id = i + 3 if heroes[0].id >= 3 else i
         debug("hero %d choice :" % hero_id,
