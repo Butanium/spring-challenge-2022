@@ -1,6 +1,6 @@
 # Spring Challenge 2022
 
-My Python bot for the [codingame spring challenge 2002](https://www.codingame.com/ide/challenge/spring-challenge-2022)
+My Python bot for the [CodinGame spring challenge 2002](https://www.codingame.com/ide/challenge/spring-challenge-2022)
 
 ## Bot description
 
@@ -13,6 +13,7 @@ If it is pushed too hard it has to defend inside the base and loose a lot of wil
 
 The bot doesn't handle the case where the enemy hero prevents the defenders from defending
 
+You can read more about it in my [CodinGame post-mortem post](https://forum.codingame.com/t/spring-challenge-2022-feedbacks-strategies/195736/33)
 ## Replays
 
 - [Win against Dbdr (who is in legend league)](https://www.codingame.com/share-replay/631346127)
